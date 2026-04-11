@@ -1,0 +1,7 @@
+comment = 'fuzzyregion: fuzzy regions for PostgreSQL/PostGIS'
+default_version = '@CARGO_VERSION@'
+module_pathname = 'fuzzyregion'
+relocatable = false
+superuser = true
+trusted = false
+requires = 'postgis'
