@@ -1,0 +1,31 @@
+[package]
+name = "fuzzyregion-pg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "fuzzyregion"
+path = "src/lib.rs"
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "pgrx_embed_fuzzyregion"
+path = "./src/bin/pgrx_embed.rs"
+
+[features]
+default = ["pg18"]
+pg14 = ["pgrx/pg14"]
+pg15 = ["pgrx/pg15"]
+pg16 = ["pgrx/pg16"]
+pg17 = ["pgrx/pg17"]
+pg18 = ["pgrx/pg18"]
+
+[dependencies]
+fuzzyregion-core = { path = "../fuzzyregion-core" }
+pgrx = "=0.17.0"
+serde_json = "1.0"
+
+[lints]
+workspace = true
