@@ -1,0 +1,13 @@
+[package]
+name = "fuzzyregion-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "fuzzyregion_core"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
