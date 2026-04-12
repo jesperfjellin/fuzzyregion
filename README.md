@@ -33,30 +33,9 @@ For a Rust-only pass without Docker, run:
 
 The lower-level Docker integration entrypoint remains available at `scripts/test-postgres.sh`, but `scripts/tests.sh` is the intended way to run the repository test suite end to end.
 
-## Quickstart
+## Try it
 
-The quickest way to try `fuzzyregion` is a single command:
-
-```bash
-./scripts/run_demo.py
-```
-
-That script:
-
-- starts an ephemeral PostgreSQL 18 + PostGIS container
-- installs `fuzzyregion`
-- loads the shipped constructor inputs for two `fuzzyregion` values
-- stores and queries each `fuzzyregion` value directly
-- composes them with `fuzzyregion_intersection`
-- writes a machine-readable demo summary
-- exports each demo `fuzzyregion` value as a tuple-level JSON file
-- exports each demo `fuzzyregion` value as a GeoJSON level view for inspection
-- renders an SVG plot from the actual database result
-- removes the container afterwards
-
-## Interactive demo
-
-The Quickstart above runs `fuzzyregion` in a throwaway container. To try the extension against a persistent PostgreSQL 18 + PostGIS instance, build and start the included Docker Compose stack:
+Build and start a PostgreSQL 18 + PostGIS instance with `fuzzyregion` pre-installed:
 
 ```bash
 docker compose up --build -d
