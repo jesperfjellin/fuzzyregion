@@ -15,7 +15,9 @@ The script owns the complete public demo flow:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import math
 import os
 import subprocess
 import sys
@@ -24,11 +26,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import requests
+
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT / "examples" / "demo-output" / "po_valley_tree_cover_transition"
 ANALYSIS_JSON = OUTPUT_DIR / "analysis.json"
 PLOT_SVG = OUTPUT_DIR / "tree_cover_transition_demo.svg"
+OSM_CACHE_DIR = OUTPUT_DIR / "osm-standard-cache"
 
 CONTAINER_NAME = "fuzzyregion-demo"
 POSTGIS_IMAGE = "postgis/postgis:18-3.6"
@@ -36,10 +41,14 @@ POSTGRES_USER = "postgres"
 POSTGRES_PASSWORD = "postgres"
 POSTGRES_DB = "fuzzyregion_demo"
 LOG_PREFIX = "[fuzzyregion:demo]"
+OSM_TILE_TEMPLATE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+OSM_USER_AGENT = "fuzzyregion-demo/0.1 (+https://github.com/jespe/fuzzyregion)"
+OSM_ATTRIBUTION = "Basemap © OpenStreetMap contributors"
+WEB_MERCATOR_LIMIT = 20037508.342789244
 
 # Figure styling: paper-like rather than dashboard-like.
 WIDTH = 1280
-HEIGHT = 810
+HEIGHT = 700
 
 BG = "#ffffff"
 INK = "#111111"
@@ -47,24 +56,22 @@ MUTED = "#555555"
 FRAME = "#8c8c8c"
 LIGHT = "#d9d9d9"
 
-MODERATE_COLORS = ["#f6dfc8", "#d7a16e", "#9d6231"]
-HIGH_COLORS = ["#dbe8d3", "#8bae7a", "#4f7751"]
-TRANSITION_COLORS = ["#dbe3f7", "#7c99d1", "#415f9e"]
+ALPHA_COLORS = ["#55a868", "#e3b505", "#c83e3a"]
 
 UI_FONT = "Arial, Helvetica, sans-serif"
+TITLE_FONT = "Georgia, 'Times New Roman', serif"
 MONO_FONT = "Menlo, Consolas, monospace"
 
-FIG_LEFT = 58
-FIG_TOP = 90
-PANEL_W = 545
-PANEL_H = 285
-COL_GAP = 38
-ROW_GAP = 42
+FIG_LEFT = 42
+FIG_TOP = 92
+PANEL_W = 382
+PANEL_H = 430
+COL_GAP = 25
 
-MAP_MARGIN_X = 14
-MAP_MARGIN_TOP = 12
+MAP_MARGIN_X = 10
+MAP_MARGIN_TOP = 42
 MAP_MARGIN_BOTTOM = 12
-LEGEND_Y = 770
+LEGEND_Y = 656
 
 
 ANALYSIS_SQL = r"""
@@ -94,19 +101,19 @@ SELECT json_build_object(
     'max_alpha', fuzzyregion_max_alpha(transition_area)
   ),
   'moderate', json_build_object(
-    'alpha_0_2', ST_AsGeoJSON(fuzzyregion_alpha_cut(moderate_area, 0.2), 3)::json,
-    'alpha_0_4', ST_AsGeoJSON(fuzzyregion_alpha_cut(moderate_area, 0.4), 3)::json,
-    'alpha_0_6', ST_AsGeoJSON(fuzzyregion_alpha_cut(moderate_area, 0.6), 3)::json
+    'alpha_0_2', ST_AsGeoJSON(ST_Transform(fuzzyregion_alpha_cut(moderate_area, 0.2), 3857), 3)::json,
+    'alpha_0_4', ST_AsGeoJSON(ST_Transform(fuzzyregion_alpha_cut(moderate_area, 0.4), 3857), 3)::json,
+    'alpha_0_6', ST_AsGeoJSON(ST_Transform(fuzzyregion_alpha_cut(moderate_area, 0.6), 3857), 3)::json
   ),
   'high', json_build_object(
-    'alpha_0_2', ST_AsGeoJSON(fuzzyregion_alpha_cut(high_area, 0.2), 3)::json,
-    'alpha_0_4', ST_AsGeoJSON(fuzzyregion_alpha_cut(high_area, 0.4), 3)::json,
-    'alpha_0_6', ST_AsGeoJSON(fuzzyregion_alpha_cut(high_area, 0.6), 3)::json
+    'alpha_0_2', ST_AsGeoJSON(ST_Transform(fuzzyregion_alpha_cut(high_area, 0.2), 3857), 3)::json,
+    'alpha_0_4', ST_AsGeoJSON(ST_Transform(fuzzyregion_alpha_cut(high_area, 0.4), 3857), 3)::json,
+    'alpha_0_6', ST_AsGeoJSON(ST_Transform(fuzzyregion_alpha_cut(high_area, 0.6), 3857), 3)::json
   ),
   'transition', json_build_object(
-    'alpha_0_2', ST_AsGeoJSON(fuzzyregion_alpha_cut(transition_area, 0.2), 3)::json,
-    'alpha_0_4', ST_AsGeoJSON(fuzzyregion_alpha_cut(transition_area, 0.4), 3)::json,
-    'alpha_0_6', ST_AsGeoJSON(fuzzyregion_alpha_cut(transition_area, 0.6), 3)::json
+    'alpha_0_2', ST_AsGeoJSON(ST_Transform(fuzzyregion_alpha_cut(transition_area, 0.2), 3857), 3)::json,
+    'alpha_0_4', ST_AsGeoJSON(ST_Transform(fuzzyregion_alpha_cut(transition_area, 0.4), 3857), 3)::json,
+    'alpha_0_6', ST_AsGeoJSON(ST_Transform(fuzzyregion_alpha_cut(transition_area, 0.6), 3857), 3)::json
   )
 )::text
 FROM overlap;
@@ -274,7 +281,7 @@ def remove_demo_container() -> None:
 
 
 def start_container() -> None:
-    status(f"Starting ephemeral demo container: {POSTGIS_IMAGE}")
+    status(f"Starting demo container: {POSTGIS_IMAGE}")
     remove_demo_container()
     run(
         [
@@ -465,6 +472,161 @@ def combine_bounds(bounds: list[Bounds]) -> Bounds:
     )
 
 
+def polygon_bounds(polygon: list[list[list[float]]]) -> Bounds | None:
+    coords = [point for ring in polygon for point in ring]
+    if not coords:
+        return None
+    xs = [float(point[0]) for point in coords]
+    ys = [float(point[1]) for point in coords]
+    return Bounds(min(xs), min(ys), max(xs), max(ys))
+
+
+def ring_area(ring: list[list[float]]) -> float:
+    if len(ring) < 3:
+        return 0.0
+    area = 0.0
+    for i in range(len(ring)):
+        x1, y1 = float(ring[i][0]), float(ring[i][1])
+        x2, y2 = float(ring[(i + 1) % len(ring)][0]), float(ring[(i + 1) % len(ring)][1])
+        area += (x1 * y2) - (x2 * y1)
+    return abs(area) / 2.0
+
+
+def largest_polygon_bounds(geometry: dict | None) -> Bounds | None:
+    if not geometry:
+        return None
+
+    if geometry["type"] == "Polygon":
+        polygons = [geometry["coordinates"]]
+    elif geometry["type"] == "MultiPolygon":
+        polygons = geometry["coordinates"]
+    else:
+        return None
+
+    best_bounds: Bounds | None = None
+    best_area = -1.0
+    for polygon in polygons:
+        if not polygon or not polygon[0]:
+            continue
+        area = ring_area(polygon[0])
+        bounds = polygon_bounds(polygon)
+        if bounds is None:
+            continue
+        if area > best_area:
+            best_area = area
+            best_bounds = bounds
+    return best_bounds
+
+
+def focus_bounds(analysis: dict) -> Bounds:
+    for key in ("alpha_0_6", "alpha_0_4", "alpha_0_2"):
+        bounds = largest_polygon_bounds(analysis["transition"][key])
+        if bounds is not None:
+            return bounds.padded(0.35)
+
+    bounds_list = [
+        geo_bounds(analysis["moderate"]["alpha_0_2"]),
+        geo_bounds(analysis["high"]["alpha_0_2"]),
+        geo_bounds(analysis["transition"]["alpha_0_2"]),
+    ]
+    present_bounds = [bound for bound in bounds_list if bound is not None]
+    return combine_bounds(present_bounds).padded(0.06) if present_bounds else Bounds(0, 0, 1, 1)
+
+
+def clamp_mercator(bounds: Bounds) -> Bounds:
+    return Bounds(
+        max(-WEB_MERCATOR_LIMIT, bounds.min_x),
+        max(-WEB_MERCATOR_LIMIT, bounds.min_y),
+        min(WEB_MERCATOR_LIMIT, bounds.max_x),
+        min(WEB_MERCATOR_LIMIT, bounds.max_y),
+    )
+
+
+def mercator_tile_range(bounds: Bounds, zoom: int) -> tuple[int, int, int, int]:
+    bounds = clamp_mercator(bounds)
+    n = 2**zoom
+    world = WEB_MERCATOR_LIMIT * 2.0
+
+    def x_index(x: float) -> int:
+        return max(0, min(n - 1, int(math.floor(((x + WEB_MERCATOR_LIMIT) / world) * n))))
+
+    def y_index(y: float) -> int:
+        return max(0, min(n - 1, int(math.floor(((WEB_MERCATOR_LIMIT - y) / world) * n))))
+
+    x_min = x_index(bounds.min_x)
+    x_max = x_index(bounds.max_x)
+    y_min = y_index(bounds.max_y)
+    y_max = y_index(bounds.min_y)
+    return x_min, x_max, y_min, y_max
+
+
+def mercator_tile_bounds(zoom: int, x: int, y: int) -> Bounds:
+    n = 2**zoom
+    world = WEB_MERCATOR_LIMIT * 2.0
+    min_x = (x / n) * world - WEB_MERCATOR_LIMIT
+    max_x = ((x + 1) / n) * world - WEB_MERCATOR_LIMIT
+    max_y = WEB_MERCATOR_LIMIT - (y / n) * world
+    min_y = WEB_MERCATOR_LIMIT - ((y + 1) / n) * world
+    return Bounds(min_x, min_y, max_x, max_y)
+
+
+def choose_osm_zoom(bounds: Bounds) -> int:
+    for zoom in range(12, 7, -1):
+        x_min, x_max, y_min, y_max = mercator_tile_range(bounds, zoom)
+        x_count = x_max - x_min + 1
+        y_count = y_max - y_min + 1
+        total = x_count * y_count
+        if x_count <= 5 and y_count <= 5 and total <= 20:
+            return zoom
+    return 8
+
+
+def fetch_osm_tile(zoom: int, x: int, y: int) -> bytes | None:
+    cache_path = OSM_CACHE_DIR / str(zoom) / str(x) / f"{y}.png"
+    if cache_path.exists():
+        return cache_path.read_bytes()
+
+    url = OSM_TILE_TEMPLATE.format(z=zoom, x=x, y=y)
+    for attempt in range(3):
+        try:
+            response = requests.get(
+                url,
+                headers={"User-Agent": OSM_USER_AGENT},
+                timeout=20,
+            )
+            response.raise_for_status()
+            break
+        except requests.RequestException:
+            if attempt == 2:
+                return None
+            time.sleep(0.5)
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(response.content)
+    return response.content
+
+
+def build_osm_basemap(bounds: Bounds) -> list[tuple[Bounds, str]]:
+    padded_bounds = clamp_mercator(bounds.padded(0.08))
+    zoom = choose_osm_zoom(padded_bounds)
+    x_min, x_max, y_min, y_max = mercator_tile_range(padded_bounds, zoom)
+    n = 2**zoom
+    x_min = max(0, x_min - 1)
+    x_max = min(n - 1, x_max + 1)
+    y_min = max(0, y_min - 1)
+    y_max = min(n - 1, y_max + 1)
+
+    tiles: list[tuple[Bounds, str]] = []
+    for x in range(x_min, x_max + 1):
+        for y in range(y_min, y_max + 1):
+            tile = fetch_osm_tile(zoom, x, y)
+            if tile is None:
+                continue
+            encoded = base64.b64encode(tile).decode("ascii")
+            tiles.append((mercator_tile_bounds(zoom, x, y), encoded))
+    return tiles
+
+
 def svg_text(x: float, y: float, text: str, **attrs: str) -> str:
     attr_text = " ".join(f'{key}="{value}"' for key, value in attrs.items())
     escaped = (
@@ -482,18 +644,6 @@ def svg_rect(x: float, y: float, width: float, height: float, **attrs: str) -> s
         f'<rect x="{x:.1f}" y="{y:.1f}" width="{width:.1f}" '
         f'height="{height:.1f}" {attr_text} />'
     )
-
-
-def panel_position(index: int) -> tuple[float, float]:
-    if index == 0:
-        return FIG_LEFT, FIG_TOP
-    if index == 1:
-        return FIG_LEFT + PANEL_W + COL_GAP, FIG_TOP
-    if index == 2:
-        return FIG_LEFT, FIG_TOP + PANEL_H + ROW_GAP
-    if index == 3:
-        return FIG_LEFT + PANEL_W + COL_GAP, FIG_TOP + PANEL_H + ROW_GAP
-    raise ValueError(f"Unsupported panel index: {index}")
 
 
 def build_transform(
@@ -564,217 +714,149 @@ def render_geometry_layer(
     )
 
 
-def render_map_panel(
-    index: int,
-    panel_label: str,
-    title: str,
+def render_alpha_object_panel(
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    caption: str,
     layers: list[tuple[dict | None, str, str, str, str]],
+    basemap_tiles: list[tuple[Bounds, str]],
     bounds: Bounds,
+    clip_id: str,
 ) -> str:
-    px, py = panel_position(index)
-
-    map_x = px + MAP_MARGIN_X
-    map_y = py + MAP_MARGIN_TOP
-    map_w = PANEL_W - (2 * MAP_MARGIN_X)
-    map_h = PANEL_H - MAP_MARGIN_TOP - MAP_MARGIN_BOTTOM
+    map_x = x + MAP_MARGIN_X
+    map_y = y + MAP_MARGIN_TOP
+    map_w = width - (2 * MAP_MARGIN_X)
+    map_h = height - MAP_MARGIN_TOP - MAP_MARGIN_BOTTOM
 
     transform = build_transform(bounds, map_x, map_y, map_w, map_h)
-    clip_id = f"map-clip-{index}"
-
-    parts = [
-        svg_text(px, py - 12, f"{panel_label} {title}", fill=INK, **{
-            "font-size": "18",
-            "font-family": UI_FONT,
-            "font-weight": "700",
-        }),
-        svg_rect(px, py, PANEL_W, PANEL_H, fill="#ffffff", stroke=FRAME, **{
-            "stroke-width": "1.0",
-        }),
-        f'<defs><clipPath id="{clip_id}">{svg_rect(map_x, map_y, map_w, map_h)}</clipPath></defs>',
-        svg_rect(map_x, map_y, map_w, map_h, fill="#ffffff", stroke=LIGHT, **{
-            "stroke-width": "0.8",
-        }),
-    ]
 
     rendered_layers: list[str] = []
-    for geometry, fill, fill_opacity, stroke, stroke_width in layers:
+    basemap_images: list[str] = []
+    for tile_bounds, encoded_tile in basemap_tiles:
+        x1, y1 = transform(tile_bounds.min_x, tile_bounds.max_y)
+        x2, y2 = transform(tile_bounds.max_x, tile_bounds.min_y)
+        basemap_images.append(
+            f'<image x="{x1:.1f}" y="{y1:.1f}" width="{(x2 - x1):.1f}" height="{(y2 - y1):.1f}" '
+            f'preserveAspectRatio="none" opacity="0.78" href="data:image/png;base64,{encoded_tile}" />'
+        )
+
+    for geometry, fill, opacity, stroke, stroke_width in layers:
         rendered = render_geometry_layer(
             geometry,
             transform,
             fill,
-            fill_opacity,
+            opacity,
             stroke,
             stroke_width,
         )
         if rendered:
             rendered_layers.append(rendered)
 
-    if rendered_layers:
-        parts.append(f'<g clip-path="url(#{clip_id})">{"".join(rendered_layers)}</g>')
-
-    return "\n".join(parts)
-
-
-def render_metrics_panel(metrics: dict) -> str:
-    px, py = panel_position(3)
-
-    moderate_levels = int(metrics["moderate_levels"])
-    high_levels = int(metrics["high_levels"])
-    transition_levels = int(metrics["transition_levels"])
-    alpha_0_2 = float(metrics["transition_alpha_0_2_km2"])
-    alpha_0_4 = float(metrics["transition_alpha_0_4_km2"])
-    alpha_0_6 = float(metrics["transition_alpha_0_6_km2"])
-
-    rows = [
-        ("Moderate class", f"fuzzyregion / {moderate_levels} levels"),
-        ("High class", f"fuzzyregion / {high_levels} levels"),
-        ("Intersection result", f"fuzzyregion / {transition_levels} levels"),
-        ("Transition area at α ≥ 0.2", f"{alpha_0_2:,.2f} km²"),
-        ("Transition area at α ≥ 0.4", f"{alpha_0_4:,.2f} km²"),
-        ("Transition area at α ≥ 0.6", f"{alpha_0_6:,.2f} km²"),
-    ]
-
-    y0 = py + 40
-    row_h = 32
-
     parts = [
-        svg_text(px, py - 12, "d SQL readout", fill=INK, **{
-            "font-size": "18",
+        svg_rect(x, y, width, height, fill="#ffffff", stroke=FRAME, **{
+            "stroke-width": "1.0",
+        }),
+        svg_text(x + 12, y + 24, caption, fill=INK, **{
+            "font-size": "14",
             "font-family": UI_FONT,
             "font-weight": "700",
         }),
-        svg_rect(px, py, PANEL_W, PANEL_H, fill="#ffffff", stroke=FRAME, **{
-            "stroke-width": "1.0",
+        f'<line x1="{x + 10:.1f}" y1="{y + 32:.1f}" x2="{x + width - 10:.1f}" y2="{y + 32:.1f}" stroke="{LIGHT}" stroke-width="0.8" />',
+        f'<defs><clipPath id="{clip_id}">{svg_rect(map_x, map_y, map_w, map_h)}</clipPath></defs>',
+        svg_rect(map_x, map_y, map_w, map_h, fill="#ffffff", stroke=LIGHT, **{
+            "stroke-width": "0.6",
         }),
-        svg_text(px + 18, py + 24, "Two overlapping classes from one raster, plus their fuzzy intersection.", fill=MUTED, **{
-            "font-size": "12",
-            "font-family": UI_FONT,
-        }),
+        f'<g clip-path="url(#{clip_id})">{"".join(basemap_images)}{"".join(rendered_layers)}</g>',
     ]
-
-    for i, (label, value) in enumerate(rows):
-        y = y0 + i * row_h
-        parts.append(
-            f'<line x1="{px + 16:.1f}" y1="{y + 10:.1f}" '
-            f'x2="{px + PANEL_W - 16:.1f}" y2="{y + 10:.1f}" '
-            f'stroke="{LIGHT}" stroke-width="0.8" />'
-        )
-        parts.append(svg_text(px + 18, y + 30, label, fill=INK, **{
-            "font-size": "13",
-            "font-family": UI_FONT,
-        }))
-        parts.append(svg_text(px + PANEL_W - 18, y + 30, value, fill=INK, **{
-            "font-size": "13",
-            "font-family": MONO_FONT,
-            "text-anchor": "end",
-        }))
-
-    parts.append(svg_text(px + 18, py + PANEL_H - 42, f"Transition α range: {metrics['min_alpha']}–{metrics['max_alpha']}", fill=MUTED, **{
-        "font-size": "12",
-        "font-family": UI_FONT,
-    }))
-    parts.append(svg_text(px + 18, py + PANEL_H - 22, "All panels share the same spatial extent; colors encode increasing alpha.", fill=MUTED, **{
-        "font-size": "12",
-        "font-family": UI_FONT,
-    }))
-
     return "\n".join(parts)
 
 
 def render_legend() -> str:
-    items = [
-        ("Moderate tree cover", MODERATE_COLORS),
-        ("High tree cover", HIGH_COLORS),
-        ("Transition zone", TRANSITION_COLORS),
-    ]
-
-    x = FIG_LEFT
     y = LEGEND_Y
+    x = (WIDTH / 2) - 96
 
     parts = [
-        f'<line x1="{FIG_LEFT:.1f}" y1="{y - 18:.1f}" x2="{WIDTH - FIG_LEFT:.1f}" y2="{y - 18:.1f}" stroke="{LIGHT}" stroke-width="0.8" />',
-        svg_text(x, y, "Legend", fill=INK, **{
-            "font-size": "13",
-            "font-family": UI_FONT,
-            "font-weight": "700",
-        }),
-    ]
+        f'<line x1="{FIG_LEFT:.1f}" y1="{y - 20:.1f}" x2="{WIDTH - FIG_LEFT:.1f}" y2="{y - 20:.1f}" stroke="{LIGHT}" stroke-width="0.8" />',
+        svg_text(x, y, "α levels", fill=INK, **{
+        "font-size": "12",
+        "font-family": UI_FONT,
+    })]
 
     x += 62
-    for label, colors in items:
-        parts.append(svg_text(x, y, label, fill=INK, **{
-            "font-size": "12",
-            "font-family": UI_FONT,
+    for alpha_label, color in zip(("0.2", "0.4", "0.6"), ALPHA_COLORS):
+        parts.append(svg_rect(x, y - 10, 14, 14, fill=color, stroke="#666666", **{
+            "stroke-width": "0.3",
         }))
-        x += 82
-        for alpha_label, color in zip(("0.2", "0.4", "0.6"), colors):
-            parts.append(svg_rect(x, y - 10, 14, 14, fill=color, stroke="#666666", **{
-                "stroke-width": "0.3",
-            }))
-            parts.append(svg_text(x + 20, y + 1, alpha_label, fill=MUTED, **{
-                "font-size": "11",
-                "font-family": MONO_FONT,
-            }))
-            x += 52
-        x += 28
+        parts.append(svg_text(x + 20, y + 1, alpha_label, fill=MUTED, **{
+            "font-size": "11",
+            "font-family": MONO_FONT,
+        }))
+        x += 58
+
+    parts.append(svg_text(WIDTH - FIG_LEFT, y + 1, OSM_ATTRIBUTION, fill=MUTED, **{
+        "font-size": "10",
+        "font-family": UI_FONT,
+        "text-anchor": "end",
+    }))
 
     return "\n".join(parts)
 
 
 def render_svg(analysis: dict) -> str:
-    geometry_bounds_list = [
-        geo_bounds(analysis["moderate"]["alpha_0_2"]),
-        geo_bounds(analysis["high"]["alpha_0_2"]),
-        geo_bounds(analysis["transition"]["alpha_0_2"]),
+    bounds = focus_bounds(analysis)
+    basemap_tiles = build_osm_basemap(bounds)
+
+    panel_y = FIG_TOP
+
+    alpha_layers = lambda group: [
+        (group["alpha_0_2"], ALPHA_COLORS[0], "0.46", "#3f8750", "0.40"),
+        (group["alpha_0_4"], ALPHA_COLORS[1], "0.54", "#b58f04", "0.48"),
+        (group["alpha_0_6"], ALPHA_COLORS[2], "0.62", "#962d2a", "0.56"),
     ]
-    bounds = combine_bounds([bound for bound in geometry_bounds_list if bound is not None]).padded(0.04)
 
-    moderate_panel = render_map_panel(
-        0,
-        "a",
-        "Moderate tree cover",
-        [
-            (analysis["moderate"]["alpha_0_2"], MODERATE_COLORS[0], "0.45", "#c49a73", "0.6"),
-            (analysis["moderate"]["alpha_0_4"], MODERATE_COLORS[1], "0.62", "#9f6b3e", "0.7"),
-            (analysis["moderate"]["alpha_0_6"], MODERATE_COLORS[2], "0.78", "#7c4b1f", "0.8"),
-        ],
+    panel_a = render_alpha_object_panel(
+        FIG_LEFT,
+        panel_y,
+        PANEL_W,
+        PANEL_H,
+        "(a) moderate",
+        alpha_layers(analysis["moderate"]),
+        basemap_tiles,
         bounds,
+        "panel-a-clip",
     )
-
-    high_panel = render_map_panel(
-        1,
-        "b",
-        "High tree cover",
-        [
-            (analysis["high"]["alpha_0_2"], HIGH_COLORS[0], "0.45", "#94aa8e", "0.6"),
-            (analysis["high"]["alpha_0_4"], HIGH_COLORS[1], "0.62", "#6f8f69", "0.7"),
-            (analysis["high"]["alpha_0_6"], HIGH_COLORS[2], "0.78", "#4a6f4d", "0.8"),
-        ],
+    panel_b = render_alpha_object_panel(
+        FIG_LEFT + PANEL_W + COL_GAP,
+        panel_y,
+        PANEL_W,
+        PANEL_H,
+        "(b) high",
+        alpha_layers(analysis["high"]),
+        basemap_tiles,
         bounds,
+        "panel-b-clip",
     )
-
-    transition_panel = render_map_panel(
-        2,
-        "c",
-        "Transition zone (moderate ∩ high)",
-        [
-            (analysis["transition"]["alpha_0_2"], TRANSITION_COLORS[0], "0.58", "#8ea7cf", "0.8"),
-            (analysis["transition"]["alpha_0_4"], TRANSITION_COLORS[1], "0.70", "#587dbf", "0.9"),
-            (analysis["transition"]["alpha_0_6"], TRANSITION_COLORS[2], "0.88", "#274985", "1.0"),
-        ],
+    panel_c = render_alpha_object_panel(
+        FIG_LEFT + (2 * (PANEL_W + COL_GAP)),
+        panel_y,
+        PANEL_W,
+        PANEL_H,
+        "(c) moderate ∩ high",
+        alpha_layers(analysis["transition"]),
+        basemap_tiles,
         bounds,
+        "panel-c-clip",
     )
-
-    metrics_panel = render_metrics_panel(analysis["metrics"])
 
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{HEIGHT}" viewBox="0 0 {WIDTH} {HEIGHT}">
   <rect width="100%" height="100%" fill="{BG}" />
-  {svg_text(FIG_LEFT, 40, 'Fuzzyregion in PostgreSQL: One Tree-Cover Raster, Two Stored Classes', fill=INK, **{'font-size': '24', 'font-weight': '700', 'font-family': UI_FONT})}
-  {svg_text(FIG_LEFT, 63, 'Panels a and b are overlapping fuzzyregion classes derived from one tree-cover raster; panel c is the fuzzyregion returned by fuzzyregion_intersection. The source dataset is only scaffolding for the type demo.', fill=MUTED, **{'font-size': '13', 'font-family': UI_FONT})}
-  {moderate_panel}
-  {high_panel}
-  {transition_panel}
-  {metrics_panel}
+  {svg_text(FIG_LEFT, 42, 'Stored fuzzyregion objects and their intersection', fill=INK, **{'font-size': '28', 'font-weight': '700', 'font-family': TITLE_FONT})}
+  <line x1="{FIG_LEFT:.1f}" y1="60.0" x2="{WIDTH - FIG_LEFT:.1f}" y2="60.0" stroke="{LIGHT}" stroke-width="0.9" />
+  {panel_a}
+  {panel_b}
+  {panel_c}
   {render_legend()}
 </svg>
 """
