@@ -1,27 +1,21 @@
 #!/usr/bin/env bash
 
-# Packages the fuzzyregion extension for the configured PostgreSQL major,
-# copies the artifacts into an already-running PostgreSQL/PostGIS container,
-# and creates the extension in the target database.
+# Packages the fuzzyregion extension for PostgreSQL 18, copies the artifacts
+# into an already-running PostgreSQL/PostGIS container, and creates the
+# extension in the target database.
 #
 # Required:
 # - FUZZYREGION_CONTAINER_NAME
-#
-# Optional:
-# - FUZZYREGION_POSTGRES_USER (default: postgres)
-# - FUZZYREGION_POSTGRES_DB (default: postgres)
-# - FUZZYREGION_PG_CONFIG (default: /usr/lib/postgresql/18/bin/pg_config)
-# - FUZZYREGION_LOG_PREFIX (default: [fuzzyregion:install])
 
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 container_name="${FUZZYREGION_CONTAINER_NAME:?FUZZYREGION_CONTAINER_NAME must be set}"
-postgres_user="${FUZZYREGION_POSTGRES_USER:-postgres}"
-postgres_db="${FUZZYREGION_POSTGRES_DB:-postgres}"
-pg_config="${FUZZYREGION_PG_CONFIG:-/usr/lib/postgresql/18/bin/pg_config}"
-log_prefix="${FUZZYREGION_LOG_PREFIX:-[fuzzyregion:install]}"
+postgres_user="postgres"
+postgres_db="fuzzyregion_test"
+pg_config="/usr/lib/postgresql/18/bin/pg_config"
+log_prefix="[fuzzyregion:install]"
 
 status() {
   echo "${log_prefix} $*"

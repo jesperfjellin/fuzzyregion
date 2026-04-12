@@ -2,23 +2,15 @@
 
 # Starts an ephemeral PostgreSQL 18/PostGIS container, installs `fuzzyregion`,
 # runs SQL smoke assertions, and always removes the container afterwards.
-#
-# Override the defaults with:
-# - FUZZYREGION_POSTGIS_IMAGE
-# - FUZZYREGION_TEST_USER
-# - FUZZYREGION_TEST_PASSWORD
-# - FUZZYREGION_TEST_DB
-# - FUZZYREGION_PG_CONFIG
 
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-postgis_image="${FUZZYREGION_POSTGIS_IMAGE:-postgis/postgis:18-3.6}"
-postgres_user="${FUZZYREGION_TEST_USER:-postgres}"
-postgres_password="${FUZZYREGION_TEST_PASSWORD:-postgres}"
-postgres_db="${FUZZYREGION_TEST_DB:-fuzzyregion_test}"
-pg_config="${FUZZYREGION_PG_CONFIG:-/usr/lib/postgresql/18/bin/pg_config}"
+postgis_image="postgis/postgis:18-3.6"
+postgres_user="postgres"
+postgres_password="postgres"
+postgres_db="fuzzyregion_test"
 smoke_sql="$repo_root/crates/fuzzyregion-pg/tests/sql/pg18_smoke.sql"
 
 container_name="fuzzyregion-pg18-test-$$-$(date +%s)"
@@ -75,10 +67,6 @@ docker logs "$container_name" 2>&1 | grep -q "PostgreSQL init process complete; 
 docker exec "$container_name" pg_isready -U "$postgres_user" -d "$postgres_db" >/dev/null
 
 FUZZYREGION_CONTAINER_NAME="$container_name" \
-FUZZYREGION_POSTGRES_USER="$postgres_user" \
-FUZZYREGION_POSTGRES_DB="$postgres_db" \
-FUZZYREGION_PG_CONFIG="$pg_config" \
-FUZZYREGION_LOG_PREFIX="[fuzzyregion:test]" \
   "$repo_root/scripts/install-postgres-extension.sh"
 
 status "Running PostgreSQL smoke assertions."
