@@ -1,6 +1,6 @@
 \set ON_ERROR_STOP on
 
--- Connect to the fuzzyregion database (PostGIS is already loaded by 10_postgis.sh).
+-- Connect to the fuzzyregion database
 \c fuzzyregion
 
 CREATE EXTENSION IF NOT EXISTS postgis;

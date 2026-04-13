@@ -39,4 +39,4 @@ COPY --from=builder \
 
 # Demo data and init script (runs on first start, after PostGIS init).
 COPY examples/demo-data/po_valley_tree_cover_transition/*.geojson /demo-data/
-COPY initdb/20_fuzzyregion_demo.sql /docker-entrypoint-initdb.d/
+COPY initdb/10_fuzzyregion_demo.sql /docker-entrypoint-initdb.d/
